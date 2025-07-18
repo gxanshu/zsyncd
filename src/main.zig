@@ -18,7 +18,7 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    if (args.len == 0) {
+    if (args.len == 1) {
         return program_args.help();
     }
 
