@@ -1,2 +1,4 @@
 .zig-cache
 zig-out
+src/playground.zig
+src/env.zig

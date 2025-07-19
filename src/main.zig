@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const program_args = @import("./arguments/main.zig");
+const help_args = @import("help.zig");
+const login_args = @import("login.zig");
+const logout_args = @import("logout.zig");
 
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
@@ -19,18 +21,22 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     if (args.len == 1) {
-        return program_args.help();
+        return help_args.help();
     }
 
-    for (args) |arg| {
-        // help page
-        if (std.mem.eql(u8, arg, "help")) {
-            return program_args.help();
-        }
+    const command = std.meta.stringToEnum(help_args.Command, args[1]);
 
-        // login page
-        if (std.mem.eql(u8, arg, "login")) {
-            return program_args.login();
-        }
+    if (command == null) {
+        std.debug.print("Invalid command\n", .{});
+        return help_args.help();
+    }
+
+    switch (command.?) {
+        .login => return login_args.login(allocator),
+        .logout => return logout_args.logout(allocator),
+        else => {
+            std.debug.print("Invalid command\n", .{});
+            return help_args.help();
+        },
     }
 }

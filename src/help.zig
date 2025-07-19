@@ -1,7 +1,15 @@
 const std = @import("std");
 
+pub const Command = enum {
+    login,
+    add,
+    pause,
+    remove,
+    logout
+};
+
 pub fn help() !void {
-    const stdout = std.io.getStdOut().writer();
+    const writer = std.io.getStdOut().writer();
     const help_str =
         \\ZSync D - Command List
         \\  Usage: zsync <command>
@@ -13,5 +21,5 @@ pub fn help() !void {
         \\  remove   : Remove a synced folder.
         \\  logout   : Disconnect your Google Drive account.
     ;
-    try stdout.print("{s}\n", .{help_str});
+    try writer.print("{s}\n", .{help_str});
 }
