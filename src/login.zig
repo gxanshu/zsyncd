@@ -10,27 +10,27 @@ const reader = std.io.getStdIn().reader();
 pub fn login(allocator: std.mem.Allocator) !void {
     // Check if user is already authenticated
     if (util.hasValidAuth(allocator)) {
-        try writer.print("✅ You are already logged in!\n", .{});
+        try writer.print(">> Already logged in. :) \n", .{});
         return;
     }
 
     // Show login instructions
     try writer.print(
-        \\ 🔐 Login with Google Account
-        \\
-        \\ 🌎 Open this link in your browser:
+        \\ ----------------------------------------
+        \\       Google Drive Sync — Login
+        \\ ----------------------------------------
+        \\ Please open this URL in your browser:
         \\
     , .{});
     try writer.print(AUTH_URL, .{env.GOOGLE_CLIENT_ID});
     try writer.print(
         \\
-        \\
-        \\ Copy and paste the authorization code here.
-        \\
+        \\ After granting access, paste the code below.
+        \\ ----------------------------------------
     , .{});
 
     // Get authorization code from user (merged from getAuthCodeFromUser)
-    try writer.print("🔑 Enter authorization code: ", .{});
+    try writer.print("\nAuthorization code: ", .{});
 
     const input_buffer = try allocator.alloc(u8, 1024);
     defer allocator.free(input_buffer);
@@ -38,18 +38,18 @@ pub fn login(allocator: std.mem.Allocator) !void {
     const auth_code = if (try reader.readUntilDelimiterOrEof(input_buffer, '\n')) |input| blk: {
         const trimmed_code = std.mem.trim(u8, input, " \t\n\r");
         if (trimmed_code.len == 0) {
-            try writer.print("❌ No code provided\n", .{});
+            try writer.print("|Error| No code provided\n", .{});
             return error.EmptyInput;
         }
         break :blk try allocator.dupe(u8, trimmed_code);
     } else {
-        try writer.print("❌ Failed to read input\n", .{});
+        try writer.print("|Error| Failed to read input\n", .{});
         return error.ReadError;
     };
     defer allocator.free(auth_code);
 
     // Exchange code for tokens (merged from exchangeCodeForTokens, buildTokenExchangePayload, makeTokenRequest)
-    try writer.print("🔄 Exchanging code for access token...\n", .{});
+    try writer.print("Exchanging code for access token...\n", .{});
 
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
@@ -79,7 +79,7 @@ pub fn login(allocator: std.mem.Allocator) !void {
     });
 
     if (response.status != .ok) {
-        std.debug.print("❌ Authentication failed. Status: {}\n", .{response.status});
+        std.debug.print("|Error| Authentication failed. Status: {}\n", .{response.status});
         std.debug.print("Response: {s}\n", .{response_body.items});
         return error.AuthenticationFailed;
     }
@@ -90,5 +90,5 @@ pub fn login(allocator: std.mem.Allocator) !void {
     // Save the tokens using our utility
     try util.saveNewToken(allocator, response_body_owned);
 
-    try writer.print("✅ Successfully logged in!\n", .{});
+    try writer.print("Successfully logged in! Enjoy Syncing :) \n", .{});
 }
