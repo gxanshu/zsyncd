@@ -14,12 +14,22 @@ const TOKEN_EXPIRY_BUFFER_SECONDS = 3600; // 1 hour
 const CONFIG_DIR_NAME = "zsyncd";
 const CONFIG_FILE_NAME = "auth.json";
 
-const TokenData = struct {
+// Struct for OAuth token response from Google
+const OAuthResponse = struct {
     access_token: []const u8,
-    refresh_token: ?[]const u8,
+    refresh_token: ?[]const u8 = null,
     expires_in: i64,
     token_type: []const u8,
-    scope: ?[]const u8,
+    scope: ?[]const u8 = null,
+};
+
+// Struct for stored token data (includes created_at timestamp)
+const StoredTokenData = struct {
+    access_token: []const u8,
+    refresh_token: ?[]const u8 = null,
+    expires_in: i64,
+    token_type: []const u8,
+    scope: ?[]const u8 = null,
     created_at: i64,
 };
 
@@ -41,11 +51,51 @@ pub fn getValidToken(allocator: std.mem.Allocator) ![]const u8 {
 
     // Token expired, try to refresh
     if (token_data.refresh_token) |refresh_token| {
-        const new_token = refreshToken(allocator, refresh_token) catch {
-            return TokenError.RefreshFailed;
+        var client = std.http.Client{ .allocator = allocator };
+        defer client.deinit();
+
+        const payload = try std.fmt.allocPrint(
+            allocator,
+            "client_id={s}&client_secret={s}&refresh_token={s}&grant_type=refresh_token",
+            .{ env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, refresh_token },
+        );
+        defer allocator.free(payload);
+
+        var response_body = std.ArrayList(u8).init(allocator);
+        defer response_body.deinit();
+
+        const headers = &[_]std.http.Header{
+            .{ .name = "Content-Type", .value = "application/x-www-form-urlencoded" },
         };
-        defer allocator.free(new_token);
-        return allocator.dupe(u8, new_token);
+
+        const response = client.fetch(.{
+            .method = .POST,
+            .location = .{ .url = "https://oauth2.googleapis.com/token" },
+            .extra_headers = headers,
+            .payload = payload,
+            .response_storage = .{ .dynamic = &response_body },
+        }) catch return TokenError.NetworkError;
+
+        if (response.status != .ok) {
+            return TokenError.RefreshFailed;
+        }
+
+        // Parse JSON response into OAuthResponse struct
+        const parsed = std.json.parseFromSlice(
+            OAuthResponse,
+            allocator,
+            response_body.items,
+            .{ .ignore_unknown_fields = true },
+        ) catch {
+            return TokenError.InvalidToken;
+        };
+        defer parsed.deinit();
+
+        // Save the refreshed token (keep the original refresh_token)
+        try saveTokenToFile(allocator, parsed.value, refresh_token);
+
+        // Return the new access token
+        return allocator.dupe(u8, parsed.value.access_token);
     }
 
     return TokenError.TokenExpired;
@@ -68,7 +118,13 @@ pub fn saveNewToken(
     allocator: std.mem.Allocator,
     json_response: []const u8,
 ) !void {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, json_response, .{}) catch {
+    // Parse JSON response into OAuthResponse struct
+    const parsed = std.json.parseFromSlice(
+        OAuthResponse,
+        allocator,
+        json_response,
+        .{ .ignore_unknown_fields = true },
+    ) catch {
         return TokenError.InvalidToken;
     };
     defer parsed.deinit();
@@ -88,7 +144,7 @@ pub fn clearAuth(allocator: std.mem.Allocator) !void {
 }
 
 // Private helper functions
-fn getStoredToken(allocator: std.mem.Allocator) !TokenData {
+fn getStoredToken(allocator: std.mem.Allocator) !StoredTokenData {
     const config_path = try getConfigFilePath(allocator);
     defer allocator.free(config_path);
 
@@ -102,99 +158,63 @@ fn getStoredToken(allocator: std.mem.Allocator) !TokenData {
     defer allocator.free(content);
     _ = try file.readAll(content);
 
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch {
+    // Parse JSON directly into StoredTokenData struct
+    const parsed = std.json.parseFromSlice(
+        StoredTokenData,
+        allocator,
+        content,
+        .{ .ignore_unknown_fields = true },
+    ) catch {
         return TokenError.InvalidToken;
     };
     defer parsed.deinit();
 
-    const json_obj = parsed.value.object;
-
-    return TokenData{
-        .access_token = try allocator.dupe(u8, json_obj.get("access_token").?.string),
-        .refresh_token = if (json_obj.get("refresh_token")) |rt| try allocator.dupe(u8, rt.string) else null,
-        .expires_in = json_obj.get("expires_in").?.integer,
-        .token_type = try allocator.dupe(u8, json_obj.get("token_type").?.string),
-        .scope = if (json_obj.get("scope")) |s| try allocator.dupe(u8, s.string) else null,
-        .created_at = json_obj.get("created_at").?.integer,
+    // Create a copy with allocated strings that we own
+    return StoredTokenData{
+        .access_token = try allocator.dupe(u8, parsed.value.access_token),
+        .refresh_token = if (parsed.value.refresh_token) |rt| try allocator.dupe(u8, rt) else null,
+        .expires_in = parsed.value.expires_in,
+        .token_type = try allocator.dupe(u8, parsed.value.token_type),
+        .scope = if (parsed.value.scope) |s| try allocator.dupe(u8, s) else null,
+        .created_at = parsed.value.created_at,
     };
 }
 
-fn isTokenValid(token_data: TokenData) bool {
+fn isTokenValid(token_data: StoredTokenData) bool {
     const current_time = std.time.timestamp();
     const expiry_time = token_data.created_at + token_data.expires_in - TOKEN_EXPIRY_BUFFER_SECONDS;
     return current_time < expiry_time;
 }
 
-fn refreshToken(
-    allocator: std.mem.Allocator,
-    refresh_token: []const u8,
-) ![]const u8 {
-    var client = std.http.Client{ .allocator = allocator };
-    defer client.deinit();
-
-    const payload = try std.fmt.allocPrint(allocator, "client_id={s}&client_secret={s}&refresh_token={s}&grant_type=refresh_token", .{ env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, refresh_token });
-    defer allocator.free(payload);
-
-    var response_body = std.ArrayList(u8).init(allocator);
-    defer response_body.deinit();
-
-    const headers = &[_]std.http.Header{
-        .{ .name = "Content-Type", .value = "application/x-www-form-urlencoded" },
-    };
-
-    const response = client.fetch(.{
-        .method = .POST,
-        .location = .{ .url = "https://oauth2.googleapis.com/token" },
-        .extra_headers = headers,
-        .payload = payload,
-        .response_storage = .{ .dynamic = &response_body },
-    }) catch return TokenError.NetworkError;
-
-    if (response.status != .ok) {
-        return TokenError.RefreshFailed;
-    }
-
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, response_body.items, .{}) catch {
-        return TokenError.InvalidToken;
-    };
-    defer parsed.deinit();
-
-    // Save the refreshed token (keep the original refresh_token)
-    try saveTokenToFile(allocator, parsed.value, refresh_token);
-
-    // Return the new access token
-    const new_access_token = parsed.value.object.get("access_token").?.string;
-    return allocator.dupe(u8, new_access_token);
-}
-
 fn saveTokenToFile(
     allocator: std.mem.Allocator,
-    json_data: std.json.Value,
+    oauth_response: OAuthResponse,
     existing_refresh_token: ?[]const u8,
 ) !void {
-    const token_obj = json_data.object;
     const current_time = std.time.timestamp();
 
-    var saved_token = std.json.ObjectMap.init(allocator);
-    defer saved_token.deinit();
+    // Create stored token data with current timestamp
+    const stored_token = StoredTokenData{
+        .access_token = oauth_response.access_token,
+        .refresh_token = oauth_response.refresh_token orelse existing_refresh_token,
+        .expires_in = oauth_response.expires_in,
+        .token_type = oauth_response.token_type,
+        .scope = oauth_response.scope,
+        .created_at = current_time,
+    };
 
-    try saved_token.put("access_token", std.json.Value{ .string = token_obj.get("access_token").?.string });
-    try saved_token.put("token_type", std.json.Value{ .string = token_obj.get("token_type").?.string });
-    try saved_token.put("expires_in", std.json.Value{ .integer = token_obj.get("expires_in").?.integer });
-    try saved_token.put("created_at", std.json.Value{ .integer = current_time });
+    // Merged ensureConfigDirExists inline
+    const home_dir = std.posix.getenv("HOME") orelse return TokenError.FileError;
+    const config_dir_path = try std.fs.path.join(
+        allocator,
+        &[_][]const u8{ home_dir, ".config", CONFIG_DIR_NAME },
+    );
+    defer allocator.free(config_dir_path);
 
-    // Handle refresh token - use new one if provided, otherwise keep existing
-    if (token_obj.get("refresh_token")) |new_refresh_token| {
-        try saved_token.put("refresh_token", std.json.Value{ .string = new_refresh_token.string });
-    } else if (existing_refresh_token) |existing_token| {
-        try saved_token.put("refresh_token", std.json.Value{ .string = existing_token });
-    }
-
-    if (token_obj.get("scope")) |scope| {
-        try saved_token.put("scope", std.json.Value{ .string = scope.string });
-    }
-
-    try ensureConfigDirExists(allocator);
+    std.fs.makeDirAbsolute(config_dir_path) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return TokenError.FileError,
+    };
 
     const config_path = try getConfigFilePath(allocator);
     defer allocator.free(config_path);
@@ -202,32 +222,23 @@ fn saveTokenToFile(
     const file = try std.fs.createFileAbsolute(config_path, .{});
     defer file.close();
 
-    const json_value = std.json.Value{ .object = saved_token };
-    try std.json.stringify(json_value, .{}, file.writer());
+    // Use JSON stringify with the struct directly
+    try std.json.stringify(stored_token, .{}, file.writer());
 }
 
 /// return absolute path of config folder
 fn getConfigFilePath(allocator: std.mem.Allocator) ![]u8 {
     const home_dir = std.posix.getenv("HOME") orelse return TokenError.FileError;
-    return std.fs.path.join(allocator, &[_][]const u8{ home_dir, ".config", CONFIG_DIR_NAME, CONFIG_FILE_NAME });
+    return std.fs.path.join(
+        allocator,
+        &[_][]const u8{ home_dir, ".config", CONFIG_DIR_NAME, CONFIG_FILE_NAME },
+    );
 }
 
-/// if config folder exist then return else wise create config folder
-fn ensureConfigDirExists(allocator: std.mem.Allocator) !void {
-    const home_dir = std.posix.getenv("HOME") orelse return TokenError.FileError;
-    const config_dir_path = try std.fs.path.join(allocator, &[_][]const u8{ home_dir, ".config", CONFIG_DIR_NAME });
-    defer allocator.free(config_dir_path);
-
-    std.fs.makeDirAbsolute(config_dir_path) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return TokenError.FileError,
-    };
-}
-
-/// free TokenData from memory
+/// free StoredTokenData from memory
 fn freeTokenData(
     allocator: std.mem.Allocator,
-    token_data: TokenData,
+    token_data: StoredTokenData,
 ) void {
     allocator.free(token_data.access_token);
     if (token_data.refresh_token) |rt| allocator.free(rt);

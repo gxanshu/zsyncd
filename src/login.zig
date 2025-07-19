@@ -29,72 +29,41 @@ pub fn login(allocator: std.mem.Allocator) !void {
         \\
     , .{});
 
-    // Get authorization code from user
-    const auth_code = try getAuthCodeFromUser(allocator);
-    defer allocator.free(auth_code);
-
-    // Exchange code for tokens
-    try exchangeCodeForTokens(allocator, auth_code);
-
-    try writer.print("✅ Successfully logged in!\n", .{});
-}
-
-fn getAuthCodeFromUser(
-    allocator: std.mem.Allocator,
-) ![]u8 {
+    // Get authorization code from user (merged from getAuthCodeFromUser)
     try writer.print("🔑 Enter authorization code: ", .{});
 
     const input_buffer = try allocator.alloc(u8, 1024);
     defer allocator.free(input_buffer);
 
-    if (try reader.readUntilDelimiterOrEof(input_buffer, '\n')) |input| {
+    const auth_code = if (try reader.readUntilDelimiterOrEof(input_buffer, '\n')) |input| blk: {
         const trimmed_code = std.mem.trim(u8, input, " \t\n\r");
         if (trimmed_code.len == 0) {
             try writer.print("❌ No code provided\n", .{});
             return error.EmptyInput;
         }
-        return allocator.dupe(u8, trimmed_code);
-    }
+        break :blk try allocator.dupe(u8, trimmed_code);
+    } else {
+        try writer.print("❌ Failed to read input\n", .{});
+        return error.ReadError;
+    };
+    defer allocator.free(auth_code);
 
-    try writer.print("❌ Failed to read input\n", .{});
-    return error.ReadError;
-}
-
-fn exchangeCodeForTokens(
-    allocator: std.mem.Allocator,
-    auth_code: []const u8,
-) !void {
+    // Exchange code for tokens (merged from exchangeCodeForTokens, buildTokenExchangePayload, makeTokenRequest)
     try writer.print("🔄 Exchanging code for access token...\n", .{});
 
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
-    const payload = try buildTokenExchangePayload(allocator, auth_code);
-    defer allocator.free(payload);
-
-    const response_body = try makeTokenRequest(&client, payload);
-    defer allocator.free(response_body);
-
-    // Save the tokens using our utility
-    try util.saveNewToken(allocator, response_body);
-}
-
-fn buildTokenExchangePayload(
-    allocator: std.mem.Allocator,
-    auth_code: []const u8,
-) ![]u8 {
-    return std.fmt.allocPrint(allocator, "client_id={s}&client_secret={s}&code={s}&grant_type=authorization_code&redirect_uri=urn:ietf:wg:oauth:2.0:oob", .{
+    // Build token exchange payload (merged from buildTokenExchangePayload)
+    const payload = try std.fmt.allocPrint(allocator, "client_id={s}&client_secret={s}&code={s}&grant_type=authorization_code&redirect_uri=urn:ietf:wg:oauth:2.0:oob", .{
         env.GOOGLE_CLIENT_ID,
         env.GOOGLE_CLIENT_SECRET,
         auth_code,
     });
-}
+    defer allocator.free(payload);
 
-fn makeTokenRequest(
-    client: *std.http.Client,
-    payload: []const u8,
-) ![]u8 {
-    var response_body = std.ArrayList(u8).init(client.allocator);
+    // Make token request (merged from makeTokenRequest)
+    var response_body = std.ArrayList(u8).init(allocator);
     defer response_body.deinit();
 
     const headers = &[_]std.http.Header{
@@ -115,5 +84,11 @@ fn makeTokenRequest(
         return error.AuthenticationFailed;
     }
 
-    return client.allocator.dupe(u8, response_body.items);
+    const response_body_owned = try allocator.dupe(u8, response_body.items);
+    defer allocator.free(response_body_owned);
+
+    // Save the tokens using our utility
+    try util.saveNewToken(allocator, response_body_owned);
+
+    try writer.print("✅ Successfully logged in!\n", .{});
 }
